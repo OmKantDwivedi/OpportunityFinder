@@ -11,7 +11,6 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import config
@@ -58,11 +57,12 @@ def update_settings(body: dict):
 
 # ----------------------------------------------------------------- pipeline
 @app.post("/api/pipeline/run")
-def run_pipeline():
-    started, err = pipeline.start_pipeline()
+def run_pipeline(body: dict | None = None):
+    name_query = ((body or {}).get("product_name") or "").strip()
+    started, err = pipeline.start_pipeline(name_query=name_query)
     if not started:
         raise HTTPException(409 if err == "Pipeline already running" else 400, err)
-    return {"started": True, "mock_mode": config.MOCK_MODE}
+    return {"started": True, "mock_mode": config.MOCK_MODE, "product_name": name_query}
 
 
 @app.post("/api/pipeline/cancel")
@@ -198,9 +198,18 @@ def export_csv(
 
 
 # ----------------------------------------------------------------- frontend
+_NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"}
+
+
 @app.get("/")
 def index():
-    return FileResponse(FRONTEND_DIR / "index.html")
+    return FileResponse(FRONTEND_DIR / "index.html", headers=_NO_CACHE)
 
 
-app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+@app.get("/static/{filename}")
+def static_file(filename: str):
+    # Serve only known frontend assets, with no-cache so updates always load.
+    safe = (FRONTEND_DIR / filename).resolve()
+    if FRONTEND_DIR.resolve() not in safe.parents or not safe.is_file():
+        raise HTTPException(404, "Not found")
+    return FileResponse(safe, headers=_NO_CACHE)
