@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="/static/styles.css" />
+<link rel="stylesheet" href="/static/styles.css?v=5" />
 </head>
 <body>
 
@@ -21,6 +21,8 @@
   </div>
   <div class="run-area">
     <span id="mockBadge" class="mock-badge" hidden>mock data</span>
+    <input id="productNameSearch" class="input run-search" type="search"
+           placeholder="Find by product name (e.g. air purifier)" />
     <div class="progress-wrap" id="progressWrap" hidden>
       <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
       <span class="progress-label" id="progressLabel">…</span>
@@ -116,6 +118,6 @@
   <div class="table-foot" id="tableFoot"></div>
 </main>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>
