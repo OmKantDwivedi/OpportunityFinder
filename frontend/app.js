@@ -122,7 +122,11 @@ async function pollPipeline() {
 
     const running = st.running;
     $("runBtn").disabled = running;
-    $("runBtn").textContent = running ? "Running…" : "Run pipeline";
+    if (running) {
+      $("runBtn").textContent = "Running…";
+    } else {
+      updateRunLabel();  // "Run pipeline" or "Search & run" depending on the name box
+    }
     const stopBtn = $("stopBtn");
     stopBtn.hidden = !running;
     if (!running) { stopBtn.disabled = false; stopBtn.textContent = "Stop"; }
@@ -162,14 +166,31 @@ async function pollPipeline() {
 }
 
 async function runPipeline() {
-  const res = await fetch("/api/pipeline/run", { method: "POST" });
+  const productName = $("productNameSearch").value.trim();
+  const res = await fetch("/api/pipeline/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(productName ? { product_name: productName } : {}),
+  });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     setNotice(`<strong>Could not start:</strong> ${escapeHtml(body.detail || res.statusText)}`, "error");
     return;
   }
+  if (productName) {
+    setNotice(`<strong>Searching the whole catalog</strong> for "${escapeHtml(productName)}" products `
+      + `(min commission applies). This scans every page, so it can take a while on large catalogs — `
+      + `watch the activity log.`, "warn");
+  }
   wasRunning = true;
   $("logPanel").open = true;
+}
+
+// Update the run button label live to reflect what clicking it will do
+function updateRunLabel() {
+  const btn = $("runBtn");
+  if (btn.disabled) return;  // running - leave "Running…"
+  btn.textContent = $("productNameSearch").value.trim() ? "Search & run" : "Run pipeline";
 }
 
 function refreshAll() {
@@ -181,6 +202,10 @@ function refreshAll() {
 
 /* ----------------------------------------------------------------- wiring */
 $("runBtn").addEventListener("click", runPipeline);
+$("productNameSearch").addEventListener("input", updateRunLabel);
+$("productNameSearch").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !$("runBtn").disabled) runPipeline();
+});
 $("stopBtn").addEventListener("click", async () => {
   $("stopBtn").disabled = true;
   $("stopBtn").textContent = "Stopping…";
