@@ -53,28 +53,40 @@ class LevantaClient:
         }
         self.log = log or (lambda m: None)
         self.should_cancel = should_cancel or (lambda: False)
+        self._logged_sample = False
 
     # ------------------------------------------------------------------ public
-    def fetch_products(self, min_commission: float = 0.0) -> list[dict]:
-        """Return normalized products that earn >= min_commission $/sale,
-        keeping at most config.MAX_PRODUCTS (highest commission first).
+    def fetch_products(
+        self, min_commission: float = 0.0, name_query: str = "", scan_all: bool = False
+    ) -> list[dict]:
+        """Return normalized products that earn >= min_commission $/sale.
 
-        The commission filter is applied per page while paginating, and
-        pagination stops at config.LEVANTA_MAX_PAGES, so huge catalogs
-        (100k+ products) don't stall the pipeline. Narrow large catalogs
-        server-side with LEVANTA_BRAND_IDS.
+        Normal mode: commission filter applied per page, pagination bounded by
+        the page-range setting, capped at config.MAX_PRODUCTS (highest first).
+
+        Name-search mode (name_query set, scan_all=True): walks the ENTIRE
+        catalog and returns every in-stock product whose title matches all the
+        query words AND meets the commission floor - no page-range or
+        MAX_PRODUCTS cap (only the safety NAME_SEARCH_MAX_MATCHES limit).
         """
+        terms = [t for t in name_query.lower().split() if t]
         if config.MOCK_MODE:
-            products = [p for p in _mock_products() if p["commission"] >= min_commission]
+            products = [
+                p for p in _mock_products()
+                if p["commission"] >= min_commission
+                and (not terms or _title_matches(p["name"], terms))
+            ]
             products.sort(key=lambda p: p["commission"], reverse=True)
-            return products[: config.MAX_PRODUCTS]
+            return products if scan_all else products[: config.MAX_PRODUCTS]
 
         bases = [self.base_url] + [b for b in FALLBACK_BASES if b != self.base_url]
         last_404 = None
-        with httpx.Client(timeout=30) as client:
+        with httpx.Client(timeout=httpx.Timeout(60.0, connect=15.0)) as client:
             for base in bases:
                 try:
-                    products = self._fetch_filtered(client, base, min_commission)
+                    products = self._fetch_filtered(
+                        client, base, min_commission, name_query=name_query, scan_all=scan_all
+                    )
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code == 404:
                         last_404 = base
@@ -100,19 +112,64 @@ class LevantaClient:
         )
 
     # ---------------------------------------------------------------- internals
+    def _get_with_retry(self, client, url, params, attempts: int = 4):
+        """GET with retry on transient network errors (timeouts, conn resets).
+        Levanta catalogs are large; a single slow page shouldn't kill the run."""
+        import time as _t
+        delay = 2.0
+        for i in range(1, attempts + 1):
+            try:
+                resp = client.get(url, headers=self.headers, params=params)
+                resp.raise_for_status()
+                return resp
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if i == attempts:
+                    raise RuntimeError(
+                        f"Levanta request failed after {attempts} attempts ({exc!r}). "
+                        "This is usually a transient network/API issue - try the run again, "
+                        "or narrow the scan with Brand IDs or a product name search."
+                    ) from exc
+                self.log(f"Levanta: network hiccup ({type(exc).__name__}), retrying in {delay:g}s "
+                         f"(attempt {i}/{attempts})...")
+                if self.should_cancel():
+                    raise
+                _t.sleep(delay)
+                delay *= 2
+        return None  # unreachable
+
     def _fetch_filtered(
-        self, client: httpx.Client, base: str, min_commission: float
+        self,
+        client: httpx.Client,
+        base: str,
+        min_commission: float,
+        name_query: str = "",
+        scan_all: bool = False,
     ) -> list[dict]:
+        """Fetch + filter products.
+
+        name_query: if set, keep only products whose title contains ALL of the
+                    query's words (case-insensitive). Levanta's API has no
+                    title-search param, so this is done client-side.
+        scan_all:   if True, ignore the page-range cap and walk the ENTIRE
+                    catalog (used for name search - "the page should be all").
+                    The MAX_PRODUCTS cap is also lifted in this mode.
+        """
         kept: list[dict] = []
-        scanned = 0          # products on pages we actually collected from
+        scanned = 0
+        rej_oos = rej_comm = rej_title = 0   # rejection reason counters
         cursor: str | None = None
         page = 0
-        start_page, end_page = rt.get_page_range()
-        if start_page > 1:
+        terms = [t for t in name_query.lower().split() if t]
+        start_page, end_page = (1, 10**9) if scan_all else rt.get_page_range()
+
+        if terms:
+            self.log(f"Levanta: searching ALL pages for products matching {name_query!r}")
+        elif start_page > 1:
             self.log(
                 f"Levanta: scanning pages {start_page}-{end_page} "
                 f"(walking pages 1-{start_page - 1} to reach the start, then collecting)"
             )
+
         while True:
             if self.should_cancel():
                 self.log("Levanta: cancelled by user during catalog fetch")
@@ -120,7 +177,7 @@ class LevantaClient:
             page += 1
             params: dict = {
                 "marketplace": config.LEVANTA_MARKETPLACE,
-                "limit": 100,
+                "limit": 500,  # API max - fewer round-trips
             }
             if config.LEVANTA_ACCESS_ONLY:
                 params["access"] = "true"
@@ -130,44 +187,83 @@ class LevantaClient:
             if cursor:
                 params["cursor"] = cursor
 
-            resp = client.get(f"{base}/products", headers=self.headers, params=params)
-            resp.raise_for_status()
+            resp = self._get_with_retry(client, f"{base}/products", params)
             payload = resp.json()
             items = payload.get("products") or []
+
+            # Diagnostic: dump the raw shape of the first product we ever see, so
+            # field-name mismatches (commission/title/price) are obvious in the log.
+            if page == 1 and items and not self._logged_sample:
+                self._logged_sample = True
+                sample = items[0]
+                self.log(
+                    "Levanta: sample product keys = " + ", ".join(sorted(sample.keys()))
+                )
+                self.log(
+                    f"Levanta: sample title={sample.get('title')!r} "
+                    f"price={sample.get('price')!r} commission={sample.get('commission')!r} "
+                    f"availability={sample.get('availability')!r} access={sample.get('access')!r}"
+                )
 
             in_range = start_page <= page <= end_page
             if in_range:
                 scanned += len(items)
                 for item in items:
+                    if item.get("availability") == "OUT_OF_STOCK":
+                        rej_oos += 1
+                        continue
                     p = _normalize(item)
-                    if p["commission"] >= min_commission:
-                        kept.append(p)
+                    if p["commission"] < min_commission:
+                        rej_comm += 1
+                        continue
+                    if terms and not _title_matches(p["name"], terms):
+                        rej_title += 1
+                        continue
+                    kept.append(p)
 
-            if in_range and (page % 10 == 0 or not payload.get("cursor") or not items):
+            if in_range and (page % 5 == 0 or not payload.get("cursor") or not items):
                 self.log(
-                    f"Levanta: page {page} (collected {scanned} products from pages "
-                    f"{start_page}-{page}) - {len(kept)} pass the >= ${min_commission:g}/sale filter"
+                    f"Levanta: scanned {scanned:,} products (page {page}) - "
+                    f"{len(kept)} match"
+                    + (f" (rejected: {rej_comm:,} low-commission, "
+                       f"{rej_title:,} wrong-title, {rej_oos:,} out-of-stock)"
+                       if (rej_comm or rej_title or rej_oos) else "")
                 )
 
             cursor = payload.get("cursor")
             if not cursor or not items:
+                self.log(f"Levanta: end of catalog reached ({scanned:,} products scanned)")
                 break
-            if page >= end_page:
+            if not scan_all and page >= end_page:
                 self.log(
                     f"Levanta: reached end of page range ({start_page}-{end_page}); "
-                    f"{scanned} products collected. Adjust 'Catalog pages to scan' in "
-                    "Settings to scan more, or set Brand IDs to target specific partners."
+                    f"{scanned:,} products scanned. Increase 'Catalog pages to scan' in "
+                    "Settings, or use product name search to scan the whole catalog."
+                )
+                break
+            # In name-search mode, allow an early stop once we have plenty of matches
+            if scan_all and len(kept) >= config.NAME_SEARCH_MAX_MATCHES:
+                self.log(
+                    f"Levanta: collected {len(kept)} matching products "
+                    f"(NAME_SEARCH_MAX_MATCHES cap) - stopping scan"
                 )
                 break
 
         kept.sort(key=lambda p: p["commission"], reverse=True)
-        if len(kept) > config.MAX_PRODUCTS:
+        # MAX_PRODUCTS cap applies only to a normal full-catalog run, not name search
+        if not scan_all and len(kept) > config.MAX_PRODUCTS:
             self.log(
-                f"Levanta: keeping the top {config.MAX_PRODUCTS} of {len(kept)} qualifying "
-                "products by commission (MAX_PRODUCTS in .env controls this)"
+                f"Levanta: {len(kept)} products qualify; keeping the top "
+                f"{config.MAX_PRODUCTS} by commission (raise MAX_PRODUCTS in .env to keep more)"
             )
             kept = kept[: config.MAX_PRODUCTS]
         return kept
+
+
+def _title_matches(title: str, terms: list[str]) -> bool:
+    """True if the product title contains every search term (case-insensitive)."""
+    t = title.lower()
+    return all(term in t for term in terms)
 
 
 def _to_float(value, default: float = 0.0) -> float:
@@ -177,34 +273,85 @@ def _to_float(value, default: float = 0.0) -> float:
         return default
 
 
-def _normalize(item: dict) -> dict:
-    # Price: v2 nests it as {"currency": "USD", "value": "189.99"}
+def _extract_price(item: dict) -> float:
     price_field = item.get("price")
     if isinstance(price_field, dict):
-        price = _to_float(price_field.get("value"))
-    else:
-        price = _to_float(price_field)
+        return _to_float(price_field.get("value") or price_field.get("amount"))
+    if price_field is not None:
+        return _to_float(price_field)
+    # Other observed keys
+    for k in ("priceValue", "listPrice", "buyBoxPrice"):
+        if item.get(k) is not None:
+            return _to_float(item[k])
+    return 0.0
 
-    # Commission: v2 gives percentage rates as strings; totalCommission is the
-    # full rate the creator earns. Dollars per sale = price * rate / 100.
-    commission_usd = 0.0
-    comm_field = item.get("commission")
-    if isinstance(comm_field, dict):
-        rate = _to_float(comm_field.get("totalCommission"))
+
+def _rate_to_fraction(rate: float) -> float:
+    """Levanta returns commission rates as DECIMAL FRACTIONS (0.060 = 6%, 0.170
+    = 17%). Some tiers/older APIs use whole-number percents (6, 17). Normalize
+    both to a fraction: values <= 1 are already fractions; larger are percents."""
+    if rate <= 1.0:
+        return rate
+    return rate / 100.0
+
+
+def _extract_commission(item: dict, price: float) -> float:
+    """Return dollars-per-sale, handling the shapes Levanta/its tiers use.
+
+    Verified shape (Creator API v2): commission rate is a decimal FRACTION
+    string, e.g. {"totalCommission": "0.170"} means 17%. Dollars per sale =
+    price * fraction. Also handles whole-number percents and direct dollars.
+    """
+    comm = item.get("commission")
+
+    if isinstance(comm, dict):
+        # Dollar amount provided directly?
+        for k in ("amount", "value", "estimatedCommission", "payout"):
+            if comm.get(k) is not None:
+                return round(_to_float(comm[k]), 2)
+        # Otherwise it's a rate (fraction or percent)
+        rate = _to_float(comm.get("totalCommission"))
         if rate == 0.0:
-            rate = _to_float(comm_field.get("sellerCommission")) + _to_float(
-                comm_field.get("marketplaceCommission")
+            rate = _to_float(comm.get("sellerCommission")) + _to_float(
+                comm.get("marketplaceCommission")
             )
-        commission_usd = round(price * rate / 100.0, 2)
-    elif comm_field is not None:
-        # Older/seller APIs may expose a flat rate field
-        commission_usd = round(price * _to_float(comm_field) / 100.0, 2)
+        if rate:
+            return round(price * _rate_to_fraction(rate), 2)
 
+    elif comm is not None:
+        v = _to_float(comm)
+        # Could be a fraction (0.17), a percent (17), or a dollar amount (54.40).
+        if 0 < v <= 1 and price > 0:
+            return round(price * v, 2)            # fraction
+        if 1 < v <= 100 and price > 0:
+            return round(price * v / 100.0, 2)    # whole-number percent
+        return round(v, 2)                         # dollar amount
+
+    # Top-level rate fields (fraction or percent)
+    for k in ("commission_rate", "commissionRate", "attributionCommission"):
+        if item.get(k) is not None:
+            return round(price * _rate_to_fraction(_to_float(item[k])), 2)
+    # Top-level dollar fields
+    for k in ("commissionAmount", "estimatedCommission", "payout", "earnings"):
+        if item.get(k) is not None:
+            return round(_to_float(item[k]), 2)
+    return 0.0
+
+
+def _extract_title(item: dict) -> str:
+    return (item.get("title") or item.get("name") or item.get("productTitle")
+            or item.get("productName") or "")
+
+
+def _normalize(item: dict) -> dict:
+    price = _extract_price(item)
+    commission_usd = _extract_commission(item, price)
     return {
-        "id": str(item.get("primaryId") or item.get("id") or item.get("asin") or item.get("title")),
-        "name": item.get("title") or item.get("name") or "",
-        "category": item.get("category") or "",
-        "brand": item.get("brandName") or item.get("brand") or "",
+        "id": str(item.get("primaryId") or item.get("id") or item.get("asin")
+                  or item.get("sku") or _extract_title(item)),
+        "name": _extract_title(item),
+        "category": item.get("category") or item.get("category_name") or "",
+        "brand": item.get("brandName") or item.get("brand") or item.get("brand_name") or "",
         "price": price,
         "commission": commission_usd,
     }
