@@ -38,6 +38,8 @@ MAX_KEYWORDS_PER_PRODUCT: int = int(os.getenv("MAX_KEYWORDS_PER_PRODUCT", "6"))
 # --- Scale guards (large catalogs) -------------------------------------------
 # After the commission filter, keep at most this many products (best first).
 MAX_PRODUCTS: int = int(os.getenv("MAX_PRODUCTS", "200"))
+# Safety cap for product-NAME search (scans whole catalog); 0 = unlimited
+NAME_SEARCH_MAX_MATCHES: int = int(os.getenv("NAME_SEARCH_MAX_MATCHES", "1000")) or 10**9
 # Hard cap on UNIQUE keywords sent to Ahrefs per run (each costs API units).
 # Keywords from the highest-commission products are kept first.
 MAX_SERP_KEYWORDS: int = int(os.getenv("MAX_SERP_KEYWORDS", "300"))
