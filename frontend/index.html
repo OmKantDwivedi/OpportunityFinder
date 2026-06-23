@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Threadfinder — Reddit Affiliate Opportunities</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/static/styles.css?v=5" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">t/</span>
+    <div>
+      <h1>Threadfinder</h1>
+      <p class="brand-sub">Levanta products × Ahrefs SERPs × Reddit threads</p>
+    </div>
+  </div>
+  <div class="run-area">
+    <span id="mockBadge" class="mock-badge" hidden>mock data</span>
+    <input id="productNameSearch" class="input run-search" type="search"
+           placeholder="Find by product name (e.g. air purifier)" />
+    <div class="progress-wrap" id="progressWrap" hidden>
+      <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+      <span class="progress-label" id="progressLabel">…</span>
+    </div>
+    <button id="runBtn" class="btn btn-primary">Run pipeline</button>
+    <button id="stopBtn" class="btn btn-danger" hidden>Stop</button>
+    <a id="exportBtn" class="btn btn-ghost" href="/api/export.csv" download>Export CSV</a>
+  </div>
+</header>
+
+<div id="notice" class="notice" hidden></div>
+
+<section class="stats" id="stats">
+  <div class="stat"><span class="stat-num" id="stProducts">–</span><span class="stat-label">Products ≥ $10</span></div>
+  <div class="stat"><span class="stat-num" id="stKeywords">–</span><span class="stat-label">Keywords</span></div>
+  <div class="stat"><span class="stat-num" id="stThreads">–</span><span class="stat-label">Reddit threads</span></div>
+  <div class="stat"><span class="stat-num" id="stOpps">–</span><span class="stat-label">Opportunities</span></div>
+  <div class="stat"><span class="stat-num" id="stTraffic">–</span><span class="stat-label">Monthly traffic reached</span></div>
+</section>
+
+<section class="filters">
+  <input id="search" class="input" type="search" placeholder="Search product, keyword, subreddit or URL…" />
+  <select id="productFilter" class="input"><option value="">All products</option></select>
+  <select id="statusFilter" class="input">
+    <option value="">All statuses</option>
+    <option>New</option><option>Approved</option><option>Commented</option>
+    <option>Rejected</option><option>On Hold</option>
+  </select>
+  <select id="minTraffic" class="input">
+    <option value="0">Any traffic</option>
+    <option value="500">≥ 500 /mo</option>
+    <option value="1000">≥ 1,000 /mo</option>
+    <option value="5000">≥ 5,000 /mo</option>
+  </select>
+  <select id="minScore" class="input">
+    <option value="0">Any score</option>
+    <option value="25">Score ≥ 25</option>
+    <option value="50">Score ≥ 50</option>
+    <option value="70">Score ≥ 70</option>
+  </select>
+</section>
+
+<details class="log-panel settings-panel" id="settingsPanel">
+  <summary>Pipeline settings <span id="settingsHint" class="log-hint">applies to the next run</span></summary>
+  <div class="settings-body">
+    <div class="setting">
+      <label for="setMinComm">Min commission ($ per sale)</label>
+      <input id="setMinComm" class="input" type="number" min="0" step="0.5" />
+      <span class="setting-help">Products earning less than this per sale are skipped.</span>
+    </div>
+    <div class="setting">
+      <label for="setPages">Catalog pages to scan</label>
+      <input id="setPages" class="input" type="text" placeholder="50  or  5,10" />
+      <span class="setting-help">Each page = 100 products. "50" scans pages 1–50; "5,10" scans only pages 5 through 10.</span>
+    </div>
+    <div class="setting setting-wide">
+      <label for="setBrandIds">Brand IDs (comma-separated, optional)</label>
+      <input id="setBrandIds" class="input" type="text" placeholder="e.g. br_12345, br_67890" />
+      <span class="setting-help">Scan only these Levanta partner brands (much faster on huge catalogs). Empty = all partnered brands.</span>
+    </div>
+    <div class="setting-actions">
+      <button id="saveSettings" class="btn btn-primary">Save settings</button>
+      <span id="settingsStatus" class="log-hint"></span>
+    </div>
+  </div>
+</details>
+
+<details class="log-panel" id="logPanel">
+  <summary>Activity log <span id="logHint" class="log-hint"></span></summary>
+  <pre id="logBox" class="log-box">No pipeline run yet.</pre>
+</details>
+
+<main class="table-wrap">
+  <table id="oppTable">
+    <thead>
+      <tr>
+        <th data-sort="product" class="sortable">Product</th>
+        <th>Keyword</th>
+        <th>Reddit thread</th>
+        <th data-sort="position" class="sortable num">Pos</th>
+        <th data-sort="traffic" class="sortable num">Traffic /mo</th>
+        <th data-sort="commission" class="sortable num">Comm.</th>
+        <th data-sort="score" class="sortable num sorted-desc">Score</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody id="oppBody"></tbody>
+  </table>
+  <div class="empty" id="emptyState" hidden>
+    <p><strong>No opportunities yet.</strong></p>
+    <p>Run the pipeline to pull Levanta products, generate keywords, and scan Ahrefs SERPs for Reddit threads.</p>
+  </div>
+  <div class="table-foot" id="tableFoot"></div>
+</main>
+
+<script src="/static/app.js?v=5"></script>
+</body>
+</html>
